@@ -1,3 +1,9 @@
 flask
 spotipy
 gunicorn
+python-dotenv
+
+$env:SPOTIPY_CLIENT_ID="55b90c75b09a49f4b1212ec53e0a2e85"
+$env:SPOTIPY_CLIENT_SECRET="514c3e8013c24f539cee7e87d8eb15b6"
+$env:SPOTIPY_REDIRECT_URI="http://127.0.0.1:5000/callback"
+$env:SPOTIPY_CACHE_PATH=".spotifycache"
