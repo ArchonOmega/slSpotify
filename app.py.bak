@@ -1,74 +1,137 @@
 import os
-from flask import Flask, redirect, request, jsonify
-import spotipy
-from spotipy.oauth2 import SpotifyOAuth
+import time
+import requests
+from flask import Flask, redirect, request, session, jsonify
 
 app = Flask(__name__)
+app.secret_key = os.urandom(24)  # used for session handling
 
-CLIENT_ID = os.environ.get("SPOTIPY_CLIENT_ID")
-CLIENT_SECRET = os.environ.get("SPOTIPY_CLIENT_SECRET")
-REDIRECT_URI = os.environ.get("SPOTIPY_REDIRECT_URI")  # e.g. http://localhost:5000/callback
-CACHE_PATH = os.environ.get("SPOTIPY_CACHE_PATH", ".spotifycache")
-SCOPE = "user-read-currently-playing user-read-playback-state"
+# Spotify app credentials (from https://developer.spotify.com/dashboard/)
+CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID")
+CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET")
 
-if not CLIENT_ID or not CLIENT_SECRET or not REDIRECT_URI:
-    raise RuntimeError("Set SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET and SPOTIPY_REDIRECT_URI env vars")
+# ⚠️ Replace this with your deployed Render URL (e.g., "https://myspotifybridge.onrender.com")
+REDIRECT_URI = os.environ.get("SPOTIFY_REDIRECT_URI")
 
-sp_oauth = SpotifyOAuth(
-    client_id=CLIENT_ID,
-    client_secret=CLIENT_SECRET,
-    redirect_uri=REDIRECT_URI,
-    scope=SCOPE,
-    cache_path=CACHE_PATH
-)
+# Spotify endpoints
+AUTH_URL = "https://accounts.spotify.com/authorize"
+TOKEN_URL = "https://accounts.spotify.com/api/token"
+NOW_PLAYING_URL = "https://api.spotify.com/v1/me/player/currently-playing"
+
+# Memory store for tokens
+access_token = None
+refresh_token = None
+token_expires_at = 0
+
 
 @app.route("/")
 def index():
-    return '<a href="/login">Login with Spotify</a>'
+    return (
+        "<h2>Spotify Bridge</h2>"
+        "<a href='/login'>Log in with Spotify</a><br>"
+        "<a href='/nowplaying'>Check Now Playing</a>"
+    )
+
 
 @app.route("/login")
 def login():
-    return redirect(sp_oauth.get_authorize_url())
+    scope = "user-read-playback-state user-read-currently-playing"
+    auth_query = {
+        "response_type": "code",
+        "redirect_uri": REDIRECT_URI,
+        "scope": scope,
+        "client_id": CLIENT_ID
+    }
+    url_args = "&".join([f"{k}={requests.utils.quote(v)}" for k, v in auth_query.items()])
+    auth_url = f"{AUTH_URL}?{url_args}"
+    return redirect(auth_url)
+
 
 @app.route("/callback")
 def callback():
+    global access_token, refresh_token, token_expires_at
+
     code = request.args.get("code")
-    error = request.args.get("error")
-    if error:
-        return f"Spotify error: {error}", 400
     if not code:
-        return "No code returned", 400
-    token_info = sp_oauth.get_access_token(code)
-    return "Authenticated. You can close this tab."
+        return "No code provided, something went wrong."
+
+    token_data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": REDIRECT_URI,
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET
+    }
+
+    r = requests.post(TOKEN_URL, data=token_data)
+    if r.status_code != 200:
+        return f"Error getting token: {r.text}"
+
+    token_info = r.json()
+    access_token = token_info["access_token"]
+    refresh_token = token_info.get("refresh_token")
+    token_expires_at = time.time() + token_info["expires_in"]
+
+    return "<h3>Authenticated! 🎉</h3><a href='/nowplaying'>Check Now Playing</a>"
+
+
+def refresh_access_token():
+    global access_token, refresh_token, token_expires_at
+    if not refresh_token:
+        return False
+
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET
+    }
+
+    r = requests.post(TOKEN_URL, data=data)
+    if r.status_code != 200:
+        print("Error refreshing token:", r.text)
+        return False
+
+    token_info = r.json()
+    access_token = token_info.get("access_token", access_token)
+    token_expires_at = time.time() + token_info.get("expires_in", 3600)
+    return True
+
 
 @app.route("/nowplaying")
-def nowplaying():
-    token_info = sp_oauth.get_cached_token()
-    if not token_info:
-        return jsonify({"error":"not_authenticated"}), 401
-    sp = spotipy.Spotify(auth_manager=sp_oauth)
-    try:
-        current = sp.current_user_playing_track()
-    except Exception as e:
-        return jsonify({"error":"api_error","detail":str(e)}), 500
-    if not current or not current.get("is_playing"):
-        return jsonify({"is_playing":False, "song":None})
-    item = current.get("item", {})
-    artist = item.get("artists",[{}])[0].get("name","")
-    track = item.get("name","")
-    prog_ms = current.get("progress_ms",0)
-    dur_ms = item.get("duration_ms",0)
-    album_art = ""
-    if item.get("album") and item["album"].get("images"):
-        album_art = item["album"]["images"][0]["url"]
+def now_playing():
+    global access_token, token_expires_at
+
+    if not access_token:
+        return jsonify({"error": "Not authenticated. Please /login first."})
+
+    if time.time() > token_expires_at:
+        refreshed = refresh_access_token()
+        if not refreshed:
+            return jsonify({"error": "Failed to refresh token. Please /login again."})
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+    r = requests.get(NOW_PLAYING_URL, headers=headers)
+
+    if r.status_code == 204:
+        return jsonify({"status": "Not playing anything right now."})
+
+    if r.status_code != 200:
+        return jsonify({"error": r.text})
+
+    data = r.json()
+    track = data["item"]["name"]
+    artist = ", ".join([a["name"] for a in data["item"]["artists"]])
+    progress = data["progress_ms"] // 1000
+    duration = data["item"]["duration_ms"] // 1000
+
     return jsonify({
-        "is_playing": True,
-        "song": f"{artist} - {track}",
-        "progress_ms": prog_ms,
-        "duration_ms": dur_ms,
-        "album_art": album_art
+        "track": track,
+        "artist": artist,
+        "progress": f"{progress // 60}:{progress % 60:02d}",
+        "duration": f"{duration // 60}:{duration % 60:02d}"
     })
 
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
