@@ -149,16 +149,18 @@ def now_playing():
         return jsonify({"error": err}), 401
 
     headers = {"Authorization": f"Bearer {access_token}"}
+
+    # --- Fetch playback info ---
     r = requests.get(NOW_PLAYING_URL, headers=headers)
     if r.status_code == 204:
         return jsonify({"is_playing": False, "song": None})
     if r.status_code != 200:
-        # Pass through error for easier debugging
         return jsonify({"error": "spotify_api_error", "detail": r.text}), r.status_code
-
     data = r.json()
+
+    # --- Parse playback ---
     item = data.get("item") or {}
-    artist = ", ".join([a.get("name","") for a in item.get("artists", [])])
+    artist = ", ".join([a.get("name", "") for a in item.get("artists", [])])
     track = item.get("name", "")
     prog_ms = data.get("progress_ms", 0)
     dur_ms = item.get("duration_ms", 0)
@@ -167,12 +169,26 @@ def now_playing():
         s = ms // 1000
         return f"{s//60}:{s%60:02d}"
 
+    # --- Fetch user profile (for display name + product tier) ---
+    user_info = {}
+    ur = requests.get("https://api.spotify.com/v1/me", headers=headers)
+    if ur.status_code == 200:
+        uj = ur.json()
+        user_info["display_name"] = uj.get("display_name", "Unknown User")
+        user_info["product"] = uj.get("product", "unknown")
+    else:
+        user_info["display_name"] = "Unknown User"
+        user_info["product"] = "unknown"
+
     return jsonify({
-        "is_playing": True,
-        "song": f"{artist} - {track}",
+        "is_playing": data.get("is_playing", False),
+        "song": f"{artist} - {track}" if track else None,
         "progress": ms_to_mmss(prog_ms),
-        "duration": ms_to_mmss(dur_ms)
+        "duration": ms_to_mmss(dur_ms),
+        "user": user_info.get("display_name"),
+        "account_type": user_info.get("product")
     })
+
 
 # --- Run ---
 if __name__ == "__main__":
