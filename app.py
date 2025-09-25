@@ -2,9 +2,12 @@
 import os
 import time
 import requests
-from flask import Flask, redirect, request, jsonify
+from flask import Flask, redirect, request, jsonify, Response
+import json
 
 app = Flask(__name__)
+app.config["JSON_AS_ASCII"] = False
+
 
 # --- Config from env (set these in Render) ---
 CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID")
@@ -180,14 +183,17 @@ def now_playing():
         user_info["display_name"] = "Unknown User"
         user_info["product"] = "unknown"
 
-    return jsonify({
+    return Response(
+    json.dumps({
         "is_playing": data.get("is_playing", False),
         "song": f"{artist} - {track}" if track else None,
         "progress": ms_to_mmss(prog_ms),
         "duration": ms_to_mmss(dur_ms),
         "user": user_info.get("display_name"),
         "account_type": user_info.get("product")
-    })
+    }, ensure_ascii=False),
+    mimetype="application/json; charset=utf-8"
+)
 
 
 # --- Run ---
